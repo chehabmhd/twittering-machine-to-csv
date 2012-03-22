@@ -1,0 +1,31 @@
+get-tweets
+
+Well this little tool was designed to pull twitters from the SEARCH api and
+append those twitters to a CSV file (if the CSV file exists). The csv file
+that is written to is named by the actual search string passed, so;
+
+ get-twitters.py #test 10
+
+will write a csv file named #test.csv of up to 10 pages of twitter results.
+The 10 is not required, and the default is 50 (the maximum number of pages
+can be up to 150).
+
+It also does a couple of other things, the tool also will sort the CSV
+file and make sure that it is not appending duplicate columns. It will
+also split the location (or flatten it if you will) so that the location
+information will show up in the row well.
+
+A couple of things to note, the delim is '|', which when it is found
+in the text file will replace it. Also all " are replaced with ', which
+seems to cause less headaches when parsing. All of the \n \rn are removed
+and the string from the text is stripped down.
+
+And yes, it is a unicode encoded CSV file, which is still a CSV file.
+
+In order to run this script, please use Python25 or greater and run
+the setup.bat tool to install the non-standard modules, which are just;
+ - simplejson
+
+Happy scraping,
+Isaac Obezo
+twitter: @isaacobezo
