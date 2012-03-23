@@ -11,7 +11,6 @@ import simplejson
 import cgi
 import codecs
 import datetime
-import yaml
 from sys import argv
 from time import sleep
 from operator import itemgetter
