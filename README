@@ -4,7 +4,7 @@ Well this little tool was designed to pull twitters from the SEARCH api and
 append those twitters to a CSV file (if the CSV file exists). The csv file
 that is written to is named by the actual search string passed, so;
 
- get-twitters.py #test 10
+ get-tweets.py #test 10
 
 will write a csv file named #test.csv of up to 10 pages of twitter results.
 The 10 is not required, and the default is 50 (the maximum number of pages
