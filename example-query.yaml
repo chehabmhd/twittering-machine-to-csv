@@ -1,0 +1,16 @@
+# test query yaml
+#
+#
+# queries to run against the query API
+query:
+    - #test
+    - @test
+
+output:
+    type: csv
+    name: test-results.csv
+
+configs:
+    attempts: 10
+    pages   : 10
+
