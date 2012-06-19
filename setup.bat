@@ -8,3 +8,6 @@ REM IF USING Python2.7 Uncomment the following line
 REM SET PATH=c:\Python27\Scripts;%PATH%
 
 easy_install -U simplejson
+easy_install -U pyyaml
+
+REM setup.py coming soon.

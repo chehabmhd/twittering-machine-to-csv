@@ -1,16 +1,43 @@
 # test query yaml
-#
-#
-# queries to run against the query API
+#   this YAML is broken into three parts;
+#    1. the query, which is the actual query requested by the tool
+#    2. the output, defines the output file for the queries and results.
+#    3. the configs, which define the configurations for the tool, like
+#       number of pages to grab, timeouts, etc.
+
+# queries to run against the query API, which are listed
+# here.
 query:
     - #test
     - @test
+    - test
 
 output:
-    type: csv
+    # The name of the output CSV file that will be created.
     name: test-results.csv
 
 configs:
-    attempts: 10
-    pages   : 10
+    # maximum number of pages to grab, the maximum is 150 (if there are actually
+    # 150 pages of history available)
+    pages   : 20
 
+    # number of attempts to make before giving up, when getting access denied
+    # from the API
+    attempts: 10
+
+    # time to wait between attempts, when getting access denied from
+    # the twitter api (which can happen when you have requested  to many
+    # rows)
+    wait    : 5
+
+    # datetimes strings are dependant on the computer's locale, so different
+    # datetie formats might be needed depending on where the tool is executed
+    # from.
+    # The datetime format is Pythonic and the formats can be found at:
+    #   http://docs.python.org/library/datetime.html#strftime-and-strptime-behavior
+    format  : '%m-%d-%Y %H:%M:%S'
+
+    # NOTE: for a format in, say London, where the 2 digit month and 2 digit day might
+    # might be interpretted differently by JET, the following datetime format
+    # is recommended (uncomment to use)
+    #format  : '%b-%d-%Y %H:%M:%S'

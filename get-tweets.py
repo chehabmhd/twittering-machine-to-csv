@@ -1,465 +1,548 @@
 #!/usr/bin/python
-""" usage: get-tweets query [max_pages]
-    query       required query to get data
-    max_pages   the maximum number of historical pages
-                the default is %(max_pages)d pages
-                max is 50.
+"""
+Read Twitter JSON dearta and convert to a CSV file
+based on the QUERIES supplied in the QUERY_YAML
+file.
 """
 import os
+import sys
 import urllib2
 import simplejson
-import cgi
 import codecs
+import yaml
 import datetime
-from sys import argv
-from time import sleep
-from operator import itemgetter
+import re
+import csv
+import datetime
 
-twitter_search ='http://search.twitter.com/search'
-max_pages    = 50
-max_attempts = 10
-twitter_get  = {
-    'rpp'           : 100,
-    'format'        : 'json',
-    'geocode'       : '',
-}
-primary_key = 'id'
-geos = {
+from time import mktime,sleep
+from HTMLParser import HTMLParser
+from rfc822 import parsedate_tz
+from argparse import ArgumentParser,FileType
+from urllib import urlencode, quote_plus, unquote_plus
+from cgi import parse_qs
+
+CREATED_AT_FORMAT = '%m/%d/%Y %H:%M:%S'
+
+TRANSFORMS = {
+    #'created_at'    : lambda s: s.strftime(CREATED_AT_FORMAT),
+    'to_user_name'  : lambda s: (s,'')[s == None],
+    'source'        : lambda s: HTMLParser().unescape(s),
+    'metadata'      : lambda s: urlencode(s),
+    }
+
+GEOS = {
     'type'      : None,
     'latitude'  : None,
     'longitude' : None,
-}
-ignores = ['metadata', 'geo']
-encoding = 'utf-8'
-delim = '|'
+    }
 
-# date time from created_at
-created_at = [u'created_at_datetime', u'created_at_datetime_shift']
-created_at_format = '%a, %d %b %Y %H:%M:%S'
-created_at_format_out = '%m/%d/%Y %H:%M:%S'
+REPLACEMENTS = [
+    ('\n', ' '),
+    ('\t', ' '),
+    ('"', "'")
+    ]
 
+# csv file globals
+DELIM    = ','
+QUOTING  = csv.QUOTE_NONNUMERIC
+ENCODING = 'utf-8'
+ENCODINGS = [
+    'utf-8',
+    'cp1250'
+    ]
 
-#
+# pretty format for print statements
+DT_PRETTY = '%m-%d-%Y %H:%M:%S'
+
 # main()
-#
-def main(query, max_pages):
-    print 'Starting: %s' % query
-    # create the output file
-    fn = query.replace(' ', '_').replace('"','').replace("'","") + '.csv'
+def main(query, configs, params, ignores, output, url,
+         transforms=TRANSFORMS, replacements=REPLACEMENTS, is_lower=True):
 
-    # check to see if the file exists, if so get the last twitter ID
-    get_dict = {}
-    keys = []
-    tweet_ids = []
-    if os.path.isfile(fn):
-        tweet_ids, keys = get_last_id(fn, primary_key, delim)
-        last_id = tweet_ids[-1]
-        print 'Found the csv file, getting last id %d' % last_id
-        get_dict['since_id'] = last_id
+    print "Starting to get twitters: %s" % ','.join(query)
 
-    # setup the search string
-    get_dict['q'] = query
-    search = get(get_dict, twitter_get)
+    # if the is_lower() is True
+    qs = query
+    if is_lower: queries = [q.lower() for q in qs]
 
-    # get the twitters
-    print 'Getting Tweets for "%s"' % query
-    t = get_tweets(search)
+    # to be explicit, these are the tools configs.
+    # how many attempts, how many pages, and how long to wait
+    # between attempts
+    print "Setting up tool configurations"
+    max_attempts = int(configs['attempts'])
+    max_pages    = int(configs['pages'])
+    wait         = int(configs['wait'])
+    datetime_format = configs['format']
 
-    # if nothing, then we do not continue
-    if len(t) == 0:
-        print 'Unable to get any tweets'
-        exit(2)
+    # make sure params are set
+    params['format'] = 'json'   # until we can parse other formats
 
-    # get the results
-    tweets  = results(t)
+    # get existing results
+    csv_file = output['name']
+    existing_tweets = read_csv(csv_file)
 
-    # check length
-    if len(tweets) < 1:
-        print "No tweets found for %s" % query
-        exit(1)
+    # get existing IDS, and add to the since_id params
+    ids = get_ids(existing_tweets)
+    max_ids = get_max_ids(ids)
+    query_params = {}
+    for q in qs:
+        query_params[q] = params
+        if max_ids.has_key(q): query_params[q]['since_id'] = max_ids[q]
 
-    # get the historical data
-    if max_pages > 0:
-        for p in xrange(max_pages):
-            if not t.has_key('next_page'):
-                print 'No more pages found.'
-                break
-            next = t['next_page']
-            print 'Getting Tweets for page %d' % (p+1)
-            get_dict = get_to_dict(next)
-            search   = get(get_dict, twitter_get)
-            t        = get_tweets(search)
-            tweets += results(t)
+    # get the tweets and write to the output file
+    pages = 0
+    count = 0
+    print "Starting twitter scrapping now: %s" % datetime.datetime.now().strftime(DT_PRETTY)
+    while True:
+        # grab tweets from twitter
+        tweets = get_all_tweets(queries, query_params, url, wait, max_attempts)
 
-    # clean the tweets
-    print "Cleaning the data"
-    tweets, keys  = clean_tweets(tweets, keys)
+        # clean tweets
+        tweets, twitter_data = clean_tweets(tweets, ids, transforms, replacements, datetime_format)
 
-    # make sure that we have all of the keys
-    for c in created_at:
-        if c in keys: continue
-        keys.append(c)
-    keys = arrange_keys(keys)
+        # write to csv file
+        write_csv(csv_file, tweets)
+        count += len(tweets)
 
-    # make sure all duplicates are removed
-    tweets = remove_duplicates(tweets, tweet_ids)
+        # get new params
+        query_params = set_new_params(twitter_data, params)
 
-    # make sure that the datetimes are setup correctly
-    tweets = add_datetimes(tweets)
+        # continue until we have no params
+        if len(query_params) == 0:
+            print "No more 'next_page' keys found, no more twitters to scrape"
+            break
 
-    # write out
-    print "Writing %d tweets to CSV file %s" % (len(tweets), fn)
-    write_to_csv(fn, tweets, keys)
+        # continue until we hit the max pages
+        if pages == max_pages-1:
+            print "Max pages '%d' reached, stopping." % max_pages
+            break
 
-# search_url:
-#   setup the serach string
-def get(get_dict, twitter_gets={}):
-    q = get_dict['q']
-    del get_dict['q']
-    s = 'q=%s&' % html_encode(q)
-    g = []
-    # add the twitter gets to get
-    for k,v in twitter_gets.items():
-        if get_dict.has_key(k): continue
-        get_dict[k] = v
+        # make sure we do not duplicate the twitter data
+        # get existing results
+        existing_tweets = read_csv(csv_file)
 
-    # setup for the url string
-    for k,v in get_dict.items():
-        g.append('%s=%s' % (k, str(v)))
+        # get existing IDS, and add to the since_id params
+        ids = get_ids(existing_tweets)
 
-    # create the url string
-    g = '&'.join(g)
-    s += g
-    return twitter_search + '?' + s
+        pages += 1
+        print "Getting results for page: %d" % pages
 
-# get_to_dict:
-#   change the GET to a dictionary
-def get_to_dict(get, original_get={}):
-    get = get.split('?')[-1]
-    out = {}
-    for l in get.split('&'):
-        l = l.split('=')
-        k = l[0]
-        if len(l) < 2: print l
-        out[l[0]] = l[1]
-    for k,v in original_get.items():
-        # assume we do not want to change it if it does not exist
-        if k in out.keys(): continue
-        out[k] = v
-    return out
+    print "Wrote '%d' tweets to: %s" % (count, csv_file)
+    print "Completed at: %s" % datetime.datetime.now().strftime(DT_PRETTY)
+
+# set up the new params, which we get from the next_page key on the
+# left over twitter data
+def set_new_params(twitter_data, original_params, key='next_page'):
+    params = {}
+    for q, keys in twitter_data.items():
+        # skip missing queries
+        if not twitter_data.has_key(q): continue
+
+        # setup the 'local' params
+        p = twitter_data[q]
+
+        # remove all queries that do not have a next page
+        if not p.has_key(key): continue
+
+        # the next_page value comes with a '?' as the first character
+        np = p[key][1:]
+
+        # convert to dictionary
+        np = parse_qs(np)
+
+        # now add to params
+        params[q] = np
+        for k,v in original_params.items():
+            if params[q].has_key(k): continue
+            params[q][k]=v
+    return params
+
+# get all the twitter data
+def get_all_tweets(queries, params, url,wait,  max_attempts):
+    """ get all of the twitter data """
+    qs = queries
+    # create the query strings
+    queries = build_queries(queries, params, url)
+
+    # get twitter data
+    tweets = get_tweets(queries, max_attempts, wait)
+    return tweets
+
+# build the query strings
+# return a tuple of the queries and the tweets (yeilded)
+def build_queries(query, params, url):
+    urls = []
+    for q in query:
+        if not params.has_key(q): continue
+        p = params[q]
+        # this lets us know to stop
+        if p == None: continue
+
+        # make sure that we are always using the same query
+        p['q'] = q
+        # make sure params are NOT lists
+        for k,v in p.items():
+            if not type(v) is list: continue
+            p[k] = v[0]
+        u = '%s?%s' % (url, urlencode(p))
+        u = u.replace('None','')
+        print "[%s] query: %s" % (q, u)
+        urls.append(u)
+    return urls
+
+# get the tweets, unload the jsons
+def get_tweets(queries, attemps=10, wait=5):
+    """ get the tweets, and unload the json object """
+    for q in queries:
+        tweet_results = get_tweet(q, attemps, wait)
+        json_results = unload_json(tweet_results)
+        if json_results == None: continue
+        yield json_results
 
 # get_tweets:
 #   grab all twitter results (100) from the twitter search
-def get_tweets(search):
-    tweets = {}
-    attempts = 0
+def get_tweet(query, attempts=10, wait=5):
+    count = 0
     while True:
-        if attempts == max_attempts: break
         try:
-            # since we are just dealing with json
-            # just load the json
-            tweets = simplejson.load(
-                urllib2.urlopen(search)
-                )
-        except simplejson.decoder.JSONDecodeError, jerr:
-            # just return the empty dict.
-            pass
+            tweet = urllib2.urlopen(query)
         except urllib2.HTTPError, herr:
-            # access denied
-            attempts += 1
-            print 'Access Denied %d, attempting in 10 seconds' % attempts
-            sleep(10)
+            count += 1
+            print 'Attempt %d: Access denied, sleeping for %d seconds' % (count, wait),
+            sleeper(wait)
             continue
-        except Exception, err:
-            raise err
+        if count > attempts:
+            print 'maximum attempts have been reached (%d) for query: %s' % (attempts, query)
+            break
         break
-    return tweets
+    print "Found tweets for query '%s'" % query
+    return tweet
 
-# results:
-#   return the results
-def results(tweets):
-    if not tweets.has_key('results'):
-        raise Exception('no results existed for tweets')
-    return tweets['results']
+# quick little progress bar for sleeper, it is seems more usefule to have
+# something showing that the tool is working instead
+def sleeper(wait=5):
+    for i in xrange(0,wait):
+        sys.stdout.write('.')
+        sleep(i)
+    print ''
 
-# keys:
-#   get the first row of keys, sort and and set
-#   primary key on the first column
-def arrange_keys(keys, pkey=primary_key):
-    # sort the keys
-    keys.sort()
-    # remove the primary key and insert into the
-    # keys as the first column
-    keys.remove(pkey)
-    keys.insert(0, pkey)
-    return keys
+# unload the json object, or raise an exception if it fails
+def unload_json(json_obj):
+    try:
+        results = simplejson.load(json_obj)
+    except simplejson.decoder.JSONDecodeError, jerr:
+        # just return the empty dict.
+        #raise jerr
+        results = None
+    return results
 
-# clean_tweets:
-#   clean the tweet data
-def clean_tweets(tweets, keys=[]):
-    res = []
-    for r in tweets:
-        # add the geo's extra columns to the data
-        for k,v in geos.items(): r[unicode(k)] = v
-        r = add_geo(r)
-        for i in ignores: del r[i]
-        for k in r.keys():
-            if not k in keys: keys.append(k)
-        res.append(r)
-    # sort the rows
-    res = sorted(res, key=itemgetter('id'))
-    return res, keys
+# read the tweets from the queries, seperate the results from the rest of
+# the data and return taht as a seperate dictionary
+def clean_tweets(all_tweets, ids, transforms=TRANSFORMS, replacements=REPLACEMENTS, datetime_format=CREATED_AT_FORMAT):
+    """ clean tweets, fixing url encodings, decoding correctly, and seperating the results
+        from the rest of the twitter data
+    """
+    results = []
+    other_twitter_data = {}
+    queries = []
+    for tweets in all_tweets:
+        d = tweets
+        # convert the query value back from the url encoding
+        q  = urllib2.unquote(tweets['query'])
+        if q in queries: continue
+        queries.append(q)
 
-# clean_val:
-#   clean the values, if they are strings
-def clean_val(v):
-    replaces = [
-        ('\n' , ''),
-        ('\r' , ''),
-        (delim, '-')
-        ]
-    if not type(v) is unicode:
-        if v == None: v = ''
-        return unicode(v)
-    v = unicode(v).strip()
-    for r in replaces:
-        v = v.replace(r[0], r[1])
-    return v
+        # get the ids, we want to not duplicate ids based on the same
+        # query
+        q_ids = []
+        if ids.has_key(q): q_ids = ids[q]
 
-# add_geo:
-#   split the geos and add the values if they exists
-def add_geo(r):
-    geo = r['geo']
-    if geo == None: return r
-    r['type']      = geo['type']
-    r['latitude']  = geo['coordinates'][0]
-    r['longitude'] = geo['coordinates'][1]
-    return r
+        # read the contents
+        tweets = clean_query_results(tweets, q, q_ids, transforms, replacements, created_at_format=datetime_format)
 
-# html_encode:
-#   encode the string into html
-def html_encode(s):
-    """ encode to HTML values """
-    encodes = {
-        " " : "%20",
-        "#" : "%23",
-        '"' : "%22",
-        "'" : "%27",
-        "@" : "%40"
-        }
-    _s = ''
-    for c in s:
-        if encodes.has_key(c):
-            _s += encodes[c]
-        else:
-            _s += c
-    _s = cgi.escape(_s)
-    return _s
+        # add to the non-results data
+        del d['results']
+        other_twitter_data[q] = d
 
-# write_to_csv:
-#   write the results to the csv file
-def write_to_csv(fn, results, keys, delim=delim):
-    mode = 'wb'
-    add_header = True
-    if os.path.isfile(fn):
-        # make sure that we have the correct keys
-        add_header = False
-        mode = 'ab'
-    f = codecs.open(fn, mode, encoding=encoding)
-    if add_header:
-        f.write(delim.join(keys) + '\n')
-    for i, r in enumerate(results):
-        line = []
-        for k in keys:
-            v = None
-            if r.has_key(k): v = r[k]
-            v = clean_val(v)
-            line.append(v)
-        line = delim.join(line)
-        if line.strip() == '': continue
-        f.write(line)
-        if i < len(results)-1: f.write('\n')
-    f.close()
-    return fn
+        # add results
+        results += tweets
 
-# get_last_id
-#   get the last id from the csv file
-def get_last_id(fn, primary_key=primary_key, delim=delim):
-    if not os.path.isfile(fn): return None
-    f = codecs.open(fn, 'rb', encoding=encoding)
-    lines = f.readlines()
-    f.close()
+    results = [r for r in results if len(r) != 0]
 
-    # populate the tweet ids
-    header = lines.pop(0).strip()
-    keys    = header.split(delim)
+    # cleaned results
+    print "Cleaned '%d' tweets for queries: %s" % (len(results), ','.join(queries))
+    return results, other_twitter_data
 
-    # clean and sort the lines (making sure that we do not have duplicate lines)
-    lines = list(set(lines))
-    lines = sorted(lines, key=lambda s: s.split(delim)[0])
-    lines = [l.strip() for l in lines if l.strip() != '']
+# clean the results, using the transforms.
+def clean_query_results(tweet, query, query_ids, transforms, replacements, key='results', encoding=ENCODING, encodings=ENCODINGS, created_at_format=CREATED_AT_FORMAT):
+    results = tweet[key]
+    data    = []
+    count   = 0
+    for l in results:
+        l['query'] = query
+        q_id = long(l['id'])
+        if q_id in query_ids: continue
 
-    # get just the tweet ids
-    tweet_ids = [l.split(delim)[0] for l in lines if not l.strip() == '']
+        # use transforms and transform data
+        for k,v in l.items():
+            if transforms.has_key(k): v = transforms[k](v)
+            if v == None: v = ''
+            v = decoder(v, encodings)
 
-    # just double check that the list is sorted, is really overkill.
-    tweet_ids.sort()
+        # clean the text (since it is being outputed to a csv)
+        l['text'] = remove_unwanted_chars(l['text'], replacements)
 
-    # make sure tweet_ids are ints
-    _tweet_ids = []
-    for t in tweet_ids:
+        # the 'created_at' needs some special care
+        l = convert_created_at(l, created_at_format)
+
+        # fix the geo coordinates
+        l = fix_geo(l)
+
+        # add to data
+        count += 1
+        data.append(l)
+
+    print "[%s]: Adding '%d' new tweets to results" % (query, count)
+    return data
+
+# in order to manage the different possible decodings, walk through different
+# encodings to figure out which one works. Otherwise jsut do a repr()
+def decoder(val, encodings=ENCODINGS):
+    for e in encodings:
         try:
-            t = int(t)
+            return val.decode(e)
         except:
+            # keep iterating til the correct encoding is discovered
             continue
-        _tweet_ids.append(t)
-    tweet_ids = _tweet_ids
-    # add the keys back to the lines
-    lines = [l.strip().split(delim) for l in lines]
-    lines.insert(0, keys)
+    # otherwise just do a repr()
+    val = repr(val)
+    return val
 
-    # make sure that previous tweets have the datetimes added
-    lines = add_datetimes(lines)
+# sometimes the tweet text has characters that will interfere with
+# the csv output, remove those characters.
+def remove_unwanted_chars(s, replacements):
+    for r in replacements:
+        try:
+            s = s.replace(r[0], r[1])
+        except:
+            # if not string, just skip it (do not try to guess what it is)
+            pass
+    return s
 
-    # since we are alread in here, just write the csv file as a sorted csv file
-    f = codecs.open(fn, mode='wb', encoding=encoding)
-    f.write(header + '\n')
-    lh = len(header.split(delim))
-    for i,l in enumerate(lines):
-        l = delim.join(l)
-        if l.strip() == '': continue
-        ls = l.split(delim)
-        if len(ls) > lh: continue
-        f.write(l)
-        if i < len(lines)-1: f.write('\n')
-    f.close()
+# convert the create_at field, since it needs some very very
+# special care. Let the lambdas convert back to a string (so
+# the user can specify their own formats in the yaml)
+def convert_created_at(line,created_at_format=CREATED_AT_FORMAT):
+    """ fix the created_at time since it is 'RFC 2822' """
+    created_at = line['created_at']
+    # convert the tuple to a list, so we can pop the tz out of it.
+    c = list(parsedate_tz(created_at))
+    tz = c.pop(-1)
+    dt = datetime.datetime.fromtimestamp(mktime(c))
+    line['created_at'] = dt.strftime(created_at_format)
+    line['created_at_shift'] = tz
+    return line
 
-    # return tweet ids and keys
-    return tweet_ids, keys
+# geos come with coordinate type, latitude and longitude (when they do
+# exist).
+def fix_geo(line):
+    # setup the geo default coordinates (they are nothing, because the
+    # output is a csv file).
+    geo = {
+        'type'      : '',
+        'latitude'  : '',
+        'longitude' : '',
+        }
+    l_geo = line['geo']
+    # if geo is NOT none, then break down the geo
+    if not l_geo == None:
+        geo['type']      = l_geo['type']
+        geo['latitude']  = l_geo['coordinates'][0]
+        geo['longitude'] = l_geo['coordinates'][1]
 
-# add_datetimes:
-def add_datetimes(items):
-    if type(items[0]) is list:
-        items = add_datetimes_list(items)
-    else:
-        items = add_datetimes_dict(items)
-    return items
+    # add the geo coordinates back onto the line
+    for k,v in geo.items(): line[k] = v
 
-def add_datetimes_dict(items):
-    out = []
-    for line in items:
-        ca = line['created_at']
-        dt, dt_shift = convert_time(ca)
-        line[created_at[0]] = dt
-        line[created_at[1]] = dt_shift
-        out.append(line)
-    return out
+    # remove the original geo, since it has been broken down
+    del line['geo']
+    return line
 
-# add_datetimes_list:
-def add_datetimes_list(lines):
-    header = lines.pop(0)
+# --- CSV function
+# read the existing csv
+def read_csv(fn, delim=DELIM, encoding=ENCODING):
+    """ read the csv file, if it exists """
+    if not os.path.isfile(fn):
+        return csv.DictReader('',delimiter=delim)
+    # read csv
+    try:
+        #reader = csv.reader(open(fn, 'rb', ENCODING), delimiter=delim)
+        print "Reading file: %s" % fn
+        reader = csv.DictReader(open(fn, 'rb', ENCODING), delimiter=delim)
+    except Exception, err:
+        raise err
+    return reader
 
-    # add extra to the headers
-    for e in created_at:
-        if e in header: continue
-        header.append(e)
-    # add the created_at datetimes to header
-    header = sort_keys(header)
+# write to the csv file
+def write_csv(fn, data, quoting=QUOTING, delim=DELIM, encoding=ENCODING, encodings=ENCODINGS):
+    # set the file options
+    mode = 'wb'
+    add_headers = True
+    if len(data) == 0:
+        print "No data to add to the file: %s" % fn
+        return 0
+    headers = get_headers(data)
+    # check to see if the file exists
+    if os.path.isfile(fn):
+        mode = 'ab'
+        add_headers = False
+        # get headers here if the file exists
+        headers = get_headers_from_csv(fn, delim=delim)
+    csv_writer = csv.writer(open(fn, mode, encoding=encoding), delimiter=delim, quoting=quoting)
+    if add_headers: csv_writer.writerow(headers)
 
-    # fix the lines
-    k = header.index('created_at')
-    out = []
-    for line in lines:
-        if len(line) == len(header):
-            out.append(line)
+    # write to csv file
+    ln = len(data)
+    count = 0
+    for l in data:
+        row = []
+        for h in headers:
+            v = ''
+            if l.has_key(h): v = l[h]
+            v = decoder(v, encodings)
+            row.append(v)
+        csv_writer.writerow(row)
+        count += 1
+    print 'processed %d of %d tweets' % (count, ln)
+    return count
+#---
+
+# since the csv functions use DictReader and DictWriter
+# the header is just the fieldnames
+def get_headers_from_csv(fn, delim=DELIM, encoding=ENCODING):
+    f = read_csv(fn, encoding=encoding, delim=delim)
+    return f.fieldnames
+
+# get the headers for the csv file from the data
+def get_headers(data, pk='id'):
+    h = []
+    for l in data:
+        for k in l.keys():
+            if k in h: continue
+            h.append(k)
+    # make sure the headers are unique
+    h = list(set(h))
+
+    # sort the results
+    h.sort()
+
+    # make sure the first element is the pk
+    h.pop(h.index(pk))
+    h.insert(0,unicode(pk))
+    return h
+
+# get all of the IDs from the exiting results
+def get_ids(data):
+    results = {}
+    for l in data:
+        q = l['query']
+        i = l['id']
+        if not results.has_key(q): results[q] = []
+        results[q].append(i)
+    # make sure that they are sorted and unique
+    for k,v in results.items():
+        v = list(set(v))
+        # the results are expected to be sorted and unique, but
+        # you never really know
+        v.sort()
+        results[k] = v
+    return results
+
+# it would be nice to assume the ids are always
+def get_max_ids(ids):
+    max_ids = {}
+    for k,v in ids.items():
+        max_id = 0
+        for i in v:
+            if long(i) > max_id: max_id = long(i)
+        # if max_id is 0, then there were no results
+        # do not add to the max_ids
+        if max_id == 0: continue
+        max_ids[k] = max_id
+    return max_ids
+
+# load the file stream and make make sure that the stream
+# is OK (really make sure we wrap queries in quotes)
+def load_yaml(stream):
+    y = _check_stream(stream)
+    try:
+        y = yaml.load(y)
+    except Exception, err:
+        raise err
+    return y
+
+# in order to deal load a yaml as without breaking on the '#' or '@'
+# characters, we need to just fix the string before we pass it off to
+# the yaml.
+# Since it needs to be opened, we might as well open it here.
+def _check_stream(stream):
+    s = stream.read()
+    chars = ['#', '@']
+    re_query = '^\s\-\s|\%s(\w*)'
+    for c in chars:
+        r = re.compile(re_query % c)
+        r = [res for res in r.findall(s) if not len(res) == 0]
+        # there is a better way to do this, with regexp, but I failed to figure
+        # it out.
+        for res in r:
+            res = c + res
+            # need to make sure that double quotation characters are replaced with singles
+            s = s.replace(res, "'%s'" % res).replace("''", "'").replace('""','"')
+    return s
+
+# inputs are provided by the yaml, and compared against the defaults
+# if they are not declared by the default then they the default value
+# is used
+def check_defaults(inputs, defaults):
+    for parent_key, items in defaults.items():
+        # if the the inputs dictionary is missing the section
+        # then add it from defaults
+        if not inputs.has_key(parent_key):
+            inputs[parent_key] = items
             continue
-        ca = line[k]
-        if ca == 'created_at': continue
-        dt, dt_shift = convert_time(ca)
+        # the section of keys exists, check that all the keys
+        # are set to either default or the inputs version
+        for k,v in items.items():
+            if inputs[parent_key].has_key(k): continue
+            inputs[parent_key][k] = v
+    return inputs
 
-        # add to the line
-        dt_i = header.index(created_at[0])
-        dt_shift_i = header.index(created_at[1])
-        line.insert(dt_i, dt)
-        line.insert(dt_shift_i, dt_shift)
-        out.append(line)
-    # readd the header
-    out.insert(0, header)
-    return out
+# open overwrite
+def open(fn, mode, encoding=ENCODING):
+    return codecs.open(fn, mode, encoding=encoding)
 
-# convert_time:
-def convert_time(ca):
-    # split on +/- to get GMT shift
-    if ca.find('+') > -1:
-        dt, dt_shift = ca.split("+")
-        dt_shift = '+' + dt_shift
-    else:
-        dt, dt_shift = ca.split("-")
-        dt_shift = '-' + dt_shift
-
-    # clean the strings
-    dt = dt.strip()
-    dt_shift = dt_shift.strip()
-
-    # clean the strings
-    dt = dt.strip()
-    dt_shift = dt_shift.strip()
-
-    # turn into datetime object
-    dt = datetime.datetime.strptime(dt, created_at_format)
-
-    # turn the datetime object to a string
-    dt = dt.strftime(created_at_format_out)
-
-    return dt, dt_shift
-
-# sort_keys:
-#   sort the keys, making sure that they are always in the same order
-def sort_keys(keys, primary='id'):
-    keys.sort()
-    p = keys.pop(keys.index(primary))
-    keys.insert(0, p)
-    return keys
-
-# remove_duplicates
-#   make sure that we are not publishing duplicates to the
-#   the csv file
-def remove_duplicates(tweets, ids, primary_key=primary_key):
-    # make sure we are dealing with integers
-    ids = [int(i) for i in ids if not str(i).strip() == '' ]
-    print "There are currently '%d' tweets" % len(tweets)
-    tweets_out = []
-    for tweet in tweets:
-        if len(tweet) < 1: continue
-        id = int(tweet[primary_key])
-        if id in ids: continue
-        tweets_out.append(tweet)
-    print "Adding '%d' tweets to the CSV file" % len(tweets_out)
-    return tweets_out
+# usage()
+def usage(args=sys.argv[1:]):
+    parser = ArgumentParser(description=__doc__)
+    parser.add_argument('query_yaml', type=FileType('rt'),
+                            metavar='QUERY_YAML',
+                            help='Query.yaml file to read the query and settings from')
+    optionals = parser.add_argument_group('optional')
+    optionals.add_argument('-c', '--config', dest='configs', type=FileType('rt'),
+                            default=os.path.join('configs', 'get-twitters.yaml'),
+                            metavar='get-twitters.yaml',
+                            help='default settings for the tool')
+    opts = parser.parse_args(args)
+    return opts
 
 
-# usage
-def usage(args, max_pages):
-    if len(args) == 0:
-        print __doc__ % vars()
-        exit(2)
-    query = args[0].lower().strip()
-    if query == '':
-        print __doc__ % vars()
-        print "Query string was empty, do nothing"
-        exit(2)
-
-    if len(args) > 1:
-        max_pages = int(args[1])
-    return query, max_pages
-
+# -- start
 if __name__ == '__main__':
-    args = argv[1:]
-    if len(args) == 0:
-        print __doc__
-        exit(1)
+    opts = usage()
+    yaml_opts    = load_yaml(opts.query_yaml)
+    configs_opts = load_yaml(opts.configs)
 
-    q = args.pop(0)
-    m = max_pages 
-    if len(args) > 0: m = int(args.pop(0))
-    main(q,m)
+    # add all options, default and set, to the yamls_opts
+    yaml_opts = check_defaults(yaml_opts, configs_opts)
+
+    # run get-twitters
+    main(**yaml_opts)
