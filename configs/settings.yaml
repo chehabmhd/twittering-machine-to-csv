@@ -1,0 +1,94 @@
+# default configurations for connecting
+# and creating the search url
+# note: all of these options can be overwritten by
+#       adding to the query yaml (excluded options,
+#       will default to the values in this yaml)
+settings:
+    search_url: 'http://search.twitter.com/search'
+    created_at_format: '%m/%d/%Y %H:%M:%S'
+    # how the get-twitter tool is configured, with
+    # max attemps and number of pages (of history)
+    # to pull down
+    max_attempts: 10
+    pages  : 150
+    wait   : 5
+
+# datetimes strings are dependant on the computer's locale, so different
+# datetie formats might be needed depending on where the tool is executed
+# from.
+# The datetime format is Pythonic and the formats can be found at:
+#   http://docs.python.org/library/datetime.html#strftime-and-strptime-behavior
+datetime_format  : '%m-%d-%Y %H:%M:%S'
+
+# NOTE: for a format in, say London, where the 2 digit month and 2 digit day might
+# might be interpretted differently by JET, the following datetime format
+# is recommended (uncomment to use)
+#datetime_format  : '%b-%d-%Y %H:%M:%S'
+
+
+
+# defines the parameters to add to the search url
+params:
+    rpp     : 100
+    geo     :
+    format  : json
+
+# which objects to ignore
+ignores: []
+
+# characters that should be replaced within the
+# twitter text, such as \n, which is replaced with a space.
+replacements:
+    # char : replace with
+    '\n' : ' '
+    '\t' : ' '
+    "'"  : '"'
+
+# output settings, for now how is the csv defined.
+# TODO: implement database functionality
+output:
+    csv:
+        encoding : utf-8
+        delim    : ','
+        # quoting, as defined by the csv module, the values are
+        #   0   csv.QUOTE_MINIMAL
+        #   1   csv.QUOTE_ALL
+        #   2   csv.QUOTE_NONNUMERIC
+        #   3   csv.QUOTE_NONE
+        # only use the numeric value for quoting here.
+        quoting  : 2
+
+# this is where to keep the list of
+# all the different encoding types
+# when pulling and writing twitter data
+encodings:
+    - utf-8
+    - iso8859_9
+    - cp1006 # Urdu
+    - cp1026 # ibm1026 Turkish
+    - cp1140 # ibm1140 Western Europe
+    - cp1250 # windows-1250 Central and Eastern Europe
+    - cp1251 # windows-1251 Bulgarian, Byelorussian, Macedonian, Russian, Serbian
+    - cp1252 # windows-1252 Western Europe
+    - cp1253 # windows-1253 Greek
+    - cp1254 # windows-1254 Turkish
+    - cp1255 # windows-1255 Hebrew
+    - cp1256 # windows1256 Arabic
+    - cp1257 # windows-1257 Baltic languages
+    - cp1258
+    - cp932 # 932, ms932, mskanji, ms-kanji Japanese
+    - cp949 # 949, ms949, uhc Korean
+    - cp950 # 950, ms950 Traditional Chinese
+    - big5
+    - big5hkscs
+    # todo: http://code.google.com/p/emoji4unicode/
+
+# in order to manage the data, we need to apply some
+# transforms to the data, those transforms are defined
+# here and are just lambda functions that get evaluated
+# within the get-tweets.py script.
+transforms:
+    #created_at   : "lambda s: s.strftime(created_at_format)"
+    to_user_name : 'lambda s: (s,EMPTY_STRING)[s == None]'
+    source       : 'lambda s: HTMLParser().unescape(s)'
+    metadata     : 'lambda s: urlencode(s)'
