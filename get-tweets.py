@@ -1,9 +1,14 @@
 #!/usr/bin/python
 """
-Read Twitter JSON dearta and convert to a CSV file
-based on the QUERIES supplied in the QUERY_YAML
-file.
+Connect to Twitter's search API (which is the free, and limited
+version API), collect JSON data from the queries supplied by the
+query.yaml (see example-query.yaml for more information), and turn
+that data into a CSV file (making sure that the twitter ID does not
+already exist).
 """
+__author__  = 'Isaac Obezo'
+__email__   = 'isaac.obezo@gmail.com'
+__version__ = 0.2
 import os
 import sys
 import urllib2
@@ -22,70 +27,63 @@ from argparse import ArgumentParser,FileType
 from urllib import urlencode, quote_plus, unquote_plus
 from cgi import parse_qs
 
-CREATED_AT_FORMAT = '%m/%d/%Y %H:%M:%S'
 
-TRANSFORMS = {
-    #'created_at'    : lambda s: s.strftime(CREATED_AT_FORMAT),
-    'to_user_name'  : lambda s: (s,'')[s == None],
-    'source'        : lambda s: HTMLParser().unescape(s),
-    'metadata'      : lambda s: urlencode(s),
-    }
-
-GEOS = {
-    'type'      : None,
-    'latitude'  : None,
-    'longitude' : None,
-    }
-
-REPLACEMENTS = [
-    ('\n', ' '),
-    ('\t', ' '),
-    ('"', "'")
-    ]
-
-# csv file globals
-DELIM    = ','
-QUOTING  = csv.QUOTE_NONNUMERIC
-ENCODING = 'utf-8'
-ENCODINGS = [
-    'utf-8',
-    'cp1250'
-    ]
-
-# pretty format for print statements
-DT_PRETTY = '%m-%d-%Y %H:%M:%S'
+CONFIGS_DIR = 'configs'
+SETTINGS    = os.path.join(CONFIGS_DIR, 'settings.yaml')
+DT_PRETTY   = '%m-%d-%Y %H:%M:%S'
+EMPTY_STRING = ''
 
 # main()
-def main(query, configs, params, ignores, output, url,
-         transforms=TRANSFORMS, replacements=REPLACEMENTS, is_lower=True):
+def main(query_settings):
+    """query, configs, params, ignores, output, url,
+    transforms=TRANSFORMS, replacements=REPLACEMENTS, is_lower=True):
+    """
+    # since the settings and the query are combined (so that definitions
+    # in the query will override all the settings), the different
+    # settings are broken out here for clarity.
+    queries  = query_settings['query']
+    settings = query_settings['settings']
+    params   = query_settings['params']
+    transforms = query_settings['transforms']
+    encodings  = query_settings['encodings']
+    replacements = query_settings['replacements']
+    output       = query_settings['output']
+    datetime_format = query_settings['datetime_format']
 
-    print "Starting to get twitters: %s" % ','.join(query)
+    # make sure transforms have been evaluated
+    transforms = eval_transforms(transforms)
 
-    # if the is_lower() is True
-    qs = query
-    if is_lower: queries = [q.lower() for q in qs]
+    # make sure the queries are really all lower case (they are treated
+    # the same by twitter, but not nessesarily by Tableau).
+    queries = [q.lower() for q in queries]
+    print "Collecting twitters for queries:", ','.join(queries)
 
     # to be explicit, these are the tools configs.
     # how many attempts, how many pages, and how long to wait
     # between attempts
     print "Setting up tool configurations"
-    max_attempts = int(configs['attempts'])
-    max_pages    = int(configs['pages'])
-    wait         = int(configs['wait'])
-    datetime_format = configs['format']
+    max_attempts = int(settings['max_attempts'])
+    max_pages    = int(settings['pages'])
+    wait         = int(settings['wait'])
+    created_at_format = settings['created_at_format']
+    datetime_format = query_settings['datetime_format']
 
     # make sure params are set
     params['format'] = 'json'   # until we can parse other formats
 
     # get existing results
     csv_file = output['name']
-    existing_tweets = read_csv(csv_file)
+    csv_settings = output['csv']
+    csv_delim    = csv_settings['delim']
+    csv_quoting  = csv_settings['quoting']
+    csv_encoding = csv_settings['encoding']
+    existing_tweets = read_csv(csv_file, csv_delim, csv_encoding)
 
     # get existing IDS, and add to the since_id params
     ids = get_ids(existing_tweets)
     max_ids = get_max_ids(ids)
     query_params = {}
-    for q in qs:
+    for q in queries:
         query_params[q] = params
         if max_ids.has_key(q): query_params[q]['since_id'] = max_ids[q]
 
@@ -93,15 +91,19 @@ def main(query, configs, params, ignores, output, url,
     pages = 0
     count = 0
     print "Starting twitter scrapping now: %s" % datetime.datetime.now().strftime(DT_PRETTY)
+    search_url   = settings['search_url']
+    wait         = settings['wait']
+    max_attempts = settings['max_attempts']
+    created_at_format = settings['created_at_format']
     while True:
-        # grab tweets from twitter
-        tweets = get_all_tweets(queries, query_params, url, wait, max_attempts)
+        # get all tweets
+        tweets = get_all_tweets(queries, query_params, search_url, wait, max_attempts)
 
         # clean tweets
-        tweets, twitter_data = clean_tweets(tweets, ids, transforms, replacements, datetime_format)
+        tweets, twitter_data = clean_tweets(tweets, ids, transforms, replacements, created_at_format, csv_encoding, encodings)
 
         # write to csv file
-        write_csv(csv_file, tweets)
+        write_csv(csv_file, tweets, csv_quoting, csv_delim, csv_encoding, encodings)
         count += len(tweets)
 
         # get new params
@@ -119,7 +121,7 @@ def main(query, configs, params, ignores, output, url,
 
         # make sure we do not duplicate the twitter data
         # get existing results
-        existing_tweets = read_csv(csv_file)
+        existing_tweets = read_csv(csv_file, csv_delim, csv_encoding)
 
         # get existing IDS, and add to the since_id params
         ids = get_ids(existing_tweets)
@@ -211,6 +213,10 @@ def get_tweet(query, attempts=10, wait=5):
             print 'Attempt %d: Access denied, sleeping for %d seconds' % (count, wait),
             sleeper(wait)
             continue
+        except Exception, err:
+            print "Unknown erro:", err
+            sleeper(wait)
+            continue
         if count > attempts:
             print 'maximum attempts have been reached (%d) for query: %s' % (attempts, query)
             break
@@ -236,15 +242,21 @@ def unload_json(json_obj):
         results = None
     return results
 
+def eval_transforms(transforms):
+    for k,v in transforms.items():
+        transforms[k]  = eval(v)
+    return transforms
+
 # read the tweets from the queries, seperate the results from the rest of
 # the data and return taht as a seperate dictionary
-def clean_tweets(all_tweets, ids, transforms=TRANSFORMS, replacements=REPLACEMENTS, datetime_format=CREATED_AT_FORMAT):
+def clean_tweets(all_tweets, ids, transforms, replacements, created_at_format, csv_encoding, encodings):
     """ clean tweets, fixing url encodings, decoding correctly, and seperating the results
         from the rest of the twitter data
     """
     results = []
     other_twitter_data = {}
     queries = []
+    all_ids = []
     for tweets in all_tweets:
         d = tweets
         # convert the query value back from the url encoding
@@ -252,13 +264,11 @@ def clean_tweets(all_tweets, ids, transforms=TRANSFORMS, replacements=REPLACEMEN
         if q in queries: continue
         queries.append(q)
 
-        # get the ids, we want to not duplicate ids based on the same
-        # query
-        q_ids = []
-        if ids.has_key(q): q_ids = ids[q]
-
         # read the contents
-        tweets = clean_query_results(tweets, q, q_ids, transforms, replacements, created_at_format=datetime_format)
+        tweets, all_ids = clean_query_results(tweets, q, ids, transforms, replacements, csv_encoding, encodings, created_at_format)
+
+        # now add the all ids back
+        ids['all'] = all_ids
 
         # add to the non-results data
         del d['results']
@@ -274,14 +284,21 @@ def clean_tweets(all_tweets, ids, transforms=TRANSFORMS, replacements=REPLACEMEN
     return results, other_twitter_data
 
 # clean the results, using the transforms.
-def clean_query_results(tweet, query, query_ids, transforms, replacements, key='results', encoding=ENCODING, encodings=ENCODINGS, created_at_format=CREATED_AT_FORMAT):
+def clean_query_results(tweet, query, query_ids, transforms, replacements, encoding, encodings, created_at_format, key='results'):
     results = tweet[key]
     data    = []
     count   = 0
+    all_ids = []
+    ids = []
+    if query_ids.has_key(query): ids = query_ids[query]
+    if query_ids.has_key('all'): all_ids = query_ids['all']
     for l in results:
         l['query'] = query
-        q_id = long(l['id'])
-        if q_id in query_ids: continue
+        q_id  = long(l['id'])
+        # we already have the id for this query, so skip it
+        if q_id in ids: continue
+        # we have this id, but for a different query, so skip it
+        if q_id in all_ids: continue
 
         # use transforms and transform data
         for k,v in l.items():
@@ -301,29 +318,55 @@ def clean_query_results(tweet, query, query_ids, transforms, replacements, key='
         # add to data
         count += 1
         data.append(l)
+        all_ids.append(q_id)
 
     print "[%s]: Adding '%d' new tweets to results" % (query, count)
-    return data
+    return data, all_ids
 
 # in order to manage the different possible decodings, walk through different
 # encodings to figure out which one works. Otherwise jsut do a repr()
-def decoder(val, encodings=ENCODINGS):
+def decoder(val, encodings):
+    if not hasattr(val, 'decode'): return val
+    r = None
     for e in encodings:
         try:
-            return val.decode(e)
-        except:
+            r = val.decode(e)
+            break
+        except Exception, err:
             # keep iterating til the correct encoding is discovered
             continue
-    # otherwise just do a repr()
-    val = repr(val)
-    return val
+    if r is None:
+        r = decode_chars(val, encodings)
+    return r
+
+# very ugly and brute force, if we reach the point
+# where the we cannot figure out what the encoding
+# is we step through the string and try to decode
+# individual characters
+def decode_chars(chars, encodings, replace=False, replace_char='?'):
+    r = ''
+    for c in chars:
+        char = None
+        for e in encodings:
+            try:
+                char = c.decode(e)
+                break
+            except:
+                continue
+        if char is None:
+            if replace:
+                char = replace_char
+            else:
+                char = repr(c)[2:-1]
+        r += char
+    return r
 
 # sometimes the tweet text has characters that will interfere with
 # the csv output, remove those characters.
 def remove_unwanted_chars(s, replacements):
-    for r in replacements:
+    for r, n in replacements.items():
         try:
-            s = s.replace(r[0], r[1])
+            s = s.replace(r, n)
         except:
             # if not string, just skip it (do not try to guess what it is)
             pass
@@ -332,7 +375,7 @@ def remove_unwanted_chars(s, replacements):
 # convert the create_at field, since it needs some very very
 # special care. Let the lambdas convert back to a string (so
 # the user can specify their own formats in the yaml)
-def convert_created_at(line,created_at_format=CREATED_AT_FORMAT):
+def convert_created_at(line, created_at_format):
     """ fix the created_at time since it is 'RFC 2822' """
     created_at = line['created_at']
     # convert the tuple to a list, so we can pop the tz out of it.
@@ -369,21 +412,20 @@ def fix_geo(line):
 
 # --- CSV function
 # read the existing csv
-def read_csv(fn, delim=DELIM, encoding=ENCODING):
+def read_csv(fn, delim, encoding):
     """ read the csv file, if it exists """
     if not os.path.isfile(fn):
         return csv.DictReader('',delimiter=delim)
     # read csv
     try:
-        #reader = csv.reader(open(fn, 'rb', ENCODING), delimiter=delim)
         print "Reading file: %s" % fn
-        reader = csv.DictReader(open(fn, 'rb', ENCODING), delimiter=delim)
+        reader = csv.DictReader(open(fn, 'rb', encoding), delimiter=delim)
     except Exception, err:
         raise err
     return reader
 
 # write to the csv file
-def write_csv(fn, data, quoting=QUOTING, delim=DELIM, encoding=ENCODING, encodings=ENCODINGS):
+def write_csv(fn, data, quoting, delim, encoding, encodings):
     # set the file options
     mode = 'wb'
     add_headers = True
@@ -396,7 +438,7 @@ def write_csv(fn, data, quoting=QUOTING, delim=DELIM, encoding=ENCODING, encodin
         mode = 'ab'
         add_headers = False
         # get headers here if the file exists
-        headers = get_headers_from_csv(fn, delim=delim)
+        headers = get_headers_from_csv(fn, delim, encoding)
     csv_writer = csv.writer(open(fn, mode, encoding=encoding), delimiter=delim, quoting=quoting)
     if add_headers: csv_writer.writerow(headers)
 
@@ -418,7 +460,7 @@ def write_csv(fn, data, quoting=QUOTING, delim=DELIM, encoding=ENCODING, encodin
 
 # since the csv functions use DictReader and DictWriter
 # the header is just the fieldnames
-def get_headers_from_csv(fn, delim=DELIM, encoding=ENCODING):
+def get_headers_from_csv(fn, delim, encoding):
     f = read_csv(fn, encoding=encoding, delim=delim)
     return f.fieldnames
 
@@ -443,9 +485,11 @@ def get_headers(data, pk='id'):
 # get all of the IDs from the exiting results
 def get_ids(data):
     results = {}
+    all_ids = []
     for l in data:
         q = l['query']
-        i = l['id']
+        i = long(l['id'])
+        if not i in all_ids: all_ids.append(i)
         if not results.has_key(q): results[q] = []
         results[q].append(i)
     # make sure that they are sorted and unique
@@ -455,6 +499,7 @@ def get_ids(data):
         # you never really know
         v.sort()
         results[k] = v
+    results['all'] = all_ids
     return results
 
 # it would be nice to assume the ids are always
@@ -473,10 +518,11 @@ def get_max_ids(ids):
 # load the file stream and make make sure that the stream
 # is OK (really make sure we wrap queries in quotes)
 def load_yaml(stream):
-    y = _check_stream(stream)
+    s = _check_stream(stream)
     try:
-        y = yaml.load(y)
+        y = yaml.load(s)
     except Exception, err:
+        #print s
         raise err
     return y
 
@@ -496,7 +542,9 @@ def _check_stream(stream):
         for res in r:
             res = c + res
             # need to make sure that double quotation characters are replaced with singles
-            s = s.replace(res, "'%s'" % res).replace("''", "'").replace('""','"')
+            s = s.replace(res + '\n', "'%s'\n" % res)
+            # clean up the extra quotes
+            s = s.replace("''", "'").replace('""','"')
     return s
 
 # inputs are provided by the yaml, and compared against the defaults
@@ -511,38 +559,44 @@ def check_defaults(inputs, defaults):
             continue
         # the section of keys exists, check that all the keys
         # are set to either default or the inputs version
+        if not type(items) is dict:
+            inputs[parent_key] = items
+            continue
         for k,v in items.items():
             if inputs[parent_key].has_key(k): continue
             inputs[parent_key][k] = v
     return inputs
 
 # open overwrite
-def open(fn, mode, encoding=ENCODING):
+def open(fn, mode, encoding):
     return codecs.open(fn, mode, encoding=encoding)
 
 # usage()
-def usage(args=sys.argv[1:]):
+#def usage(args=sys.argv[1:]):
+def usage():
     parser = ArgumentParser(description=__doc__)
-    parser.add_argument('query_yaml', type=FileType('rt'),
+    parser.add_argument('query', type=FileType('rt'),
                             metavar='QUERY_YAML',
                             help='Query.yaml file to read the query and settings from')
     optionals = parser.add_argument_group('optional')
-    optionals.add_argument('-c', '--config', dest='configs', type=FileType('rt'),
-                            default=os.path.join('configs', 'get-twitters.yaml'),
-                            metavar='get-twitters.yaml',
+    optionals.add_argument('-s', '--settings', dest='settings', type=FileType('rt'),
+                            default=SETTINGS,
+                            metavar='SETTINGS.YAML',
                             help='default settings for the tool')
-    opts = parser.parse_args(args)
+    opts = parser.parse_args()
+    
+    # be sure to load the yamls
+    opts.settings = load_yaml(opts.settings)
+    opts.query    = load_yaml(opts.query)
     return opts
-
 
 # -- start
 if __name__ == '__main__':
     opts = usage()
-    yaml_opts    = load_yaml(opts.query_yaml)
-    configs_opts = load_yaml(opts.configs)
+    query    = opts.query
+    settings = opts.settings
 
     # add all options, default and set, to the yamls_opts
-    yaml_opts = check_defaults(yaml_opts, configs_opts)
+    query_settings = check_defaults(query, settings)
 
-    # run get-twitters
-    main(**yaml_opts)
+    main(query_settings)
