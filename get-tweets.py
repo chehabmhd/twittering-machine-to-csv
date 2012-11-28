@@ -33,6 +33,47 @@ SETTINGS    = os.path.join(CONFIGS_DIR, 'settings.yaml')
 DT_PRETTY   = '%m-%d-%Y %H:%M:%S'
 EMPTY_STRING = ''
 
+ENCODINGS = [
+    "utf-8",
+    "iso8859_9",
+    "cp1006",
+    "cp1026",
+    "cp1140",
+    "cp1250",
+    "cp1251", # windows-1251 Bulgarian, Byelorussian, Macedonian, Russian, Serbian
+    "cp1252", # windows-1252 Western Europe
+    "cp1253", # windows-1253 Greek
+    "cp1254",  # windows-1254 Turkish
+    "cp1255",  # windows-1255 Hebrew
+    "cp1256",  # windows1256 Arabic
+    "cp1257",  # windows-1257 Baltic languages
+    "cp1258",
+    "cp932",  # 932, ms932, mskanji, ms-kanji Japanese
+    "cp949",  # 949, ms949, uhc Korean
+    "cp950",  # 950, ms950 Traditional Chinese
+    "big5",
+    "big5hkscs",
+    ]
+
+REPLACEMENTS = {
+    '\n' : ' ',
+    '\r' : ' ',
+    '\t' : ' ',
+    '"'  : "'",
+    r'\u2109' : "'",
+    r'\u2018' : "'",
+    r'\u2019' : "'",
+    r'\u201c' : "'",
+    r'\u201d' : "'",
+    r'\u221a' : '?',
+    r'\u2011' : '-',
+    r'\u2012' : '-',
+    r'\u2013' : '-',
+    r'\u2014' : '-',
+    r'\u2015' : '-',
+    r'\u2026' : '...',
+}
+
 # main()
 def main(query_settings):
     """query, configs, params, ignores, output, url,
@@ -285,6 +326,8 @@ def clean_tweets(all_tweets, ids, transforms, replacements, created_at_format, c
 
 # clean the results, using the transforms.
 def clean_query_results(tweet, query, query_ids, transforms, replacements, encoding, encodings, created_at_format, key='results'):
+    encodings = ENCODINGS
+    replacements = REPLACEMENTS
     results = tweet[key]
     data    = []
     count   = 0
@@ -305,6 +348,7 @@ def clean_query_results(tweet, query, query_ids, transforms, replacements, encod
             if transforms.has_key(k): v = transforms[k](v)
             if v == None: v = ''
             v = decoder(v, encodings)
+            l[k] = v
 
         # clean the text (since it is being outputed to a csv)
         l['text'] = remove_unwanted_chars(l['text'], replacements)
@@ -325,8 +369,9 @@ def clean_query_results(tweet, query, query_ids, transforms, replacements, encod
 
 # in order to manage the different possible decodings, walk through different
 # encodings to figure out which one works. Otherwise jsut do a repr()
-def decoder(val, encodings):
+def decoder(val, encodings=ENCODINGS):
     if not hasattr(val, 'decode'): return val
+    val = HTMLParser().unescape(val)
     r = None
     for e in encodings:
         try:
@@ -364,12 +409,10 @@ def decode_chars(chars, encodings, replace=False, replace_char='?'):
 # sometimes the tweet text has characters that will interfere with
 # the csv output, remove those characters.
 def remove_unwanted_chars(s, replacements):
+    s = unicode(s)
     for r, n in replacements.items():
-        try:
+        if s.find(r) > -1:
             s = s.replace(r, n)
-        except:
-            # if not string, just skip it (do not try to guess what it is)
-            pass
     return s
 
 # convert the create_at field, since it needs some very very
@@ -390,13 +433,15 @@ def convert_created_at(line, created_at_format):
 # exist).
 def fix_geo(line):
     # setup the geo default coordinates (they are nothing, because the
-    # output is a csv file).
+    # output is a
     geo = {
         'type'      : '',
         'latitude'  : '',
         'longitude' : '',
         }
     l_geo = line['geo']
+    if type(l_geo) is not dict:
+        if l_geo.strip() == '': l_geo = None
     # if geo is NOT none, then break down the geo
     if not l_geo == None:
         geo['type']      = l_geo['type']
@@ -584,7 +629,7 @@ def usage():
                             metavar='SETTINGS.YAML',
                             help='default settings for the tool')
     opts = parser.parse_args()
-    
+
     # be sure to load the yamls
     opts.settings = load_yaml(opts.settings)
     opts.query    = load_yaml(opts.query)
