@@ -41,8 +41,16 @@ ignores: []
 replacements:
     # char : replace with
     '\n' : ' '
+    '\r' : ' '
     '\t' : ' '
-    "'"  : '"'
+    '"'  : "'"
+    '\u2014' : '-'
+    '\u2019' : "'"
+    '\u201d' : "'"
+    '\u201c' : "'"
+    '""'     : "'"
+    '&amp;'  : '&'
+    '"""'    : "'"
 
 # output settings, for now how is the csv defined.
 # TODO: implement database functionality
